@@ -4,7 +4,7 @@ Standard library only. Run from the repository root:
 
     python assets/src/build.py
 
-The point cloud is seeded, so the output is reproducible; change SEED for a new variation.
+The particle layout is seeded, so the output is reproducible; change SEED for a new variation.
 """
 
 import math
@@ -13,12 +13,6 @@ from pathlib import Path
 
 OUT = Path(__file__).resolve().parent.parent
 SEED = 1107
-TURNS = 0.75      # cross-section twist per trip around the ring
-SQUARENESS = 3.2  # 2 = round tube, higher = squarer section
-TUBE = 0.34       # tube radius relative to ring radius
-SWELL = 0.3       # how much the tube thickens and thins around the ring
-TILT = 1.02       # ring tilt toward the viewer (radians)
-ROLL = 0.22       # ring rotation in its own plane (radians)
 
 # Design tokens
 BG = "#0A0A0B"
@@ -129,81 +123,205 @@ def wordmark(x0, baseline, scale=1.0, color=TEXT, accent=ACCENT):
 
 
 # ---------------------------------------------------------------------------
-# Point cloud: a torus whose rounded-square cross-section twists as it travels
-# around the ring, sampled as section rings like a scan of a machined part.
-# One section is highlighted as the "measured" slice.
+# Hero artwork: an accretion disc orbiting inside a spacetime gravity well.
+#
+# Animated with CSS keyframes only (no scripts), which GitHub keeps when it
+# serves an SVG as an image. The trick that keeps it light: every orbit ring
+# is a flat circle of dots inside a fixed "tilt" transform (translate, roll,
+# squash), and only an inner group rotates. A rotating circle seen through a
+# fixed affine squash is exactly an orbit seen in perspective-free 3D, so a
+# few dozen rotating groups move thousands of particles.
+#
+# Seamless loop: the disc is built with exact 3-fold symmetry, and each ring
+# turns k x 120 degrees per LOOP (k = 1..6, inner rings faster). After LOOP
+# seconds every ring lands on a copy of its start state, so the arms wind up
+# and re-form without a jump. Every other motion divides LOOP evenly.
 # ---------------------------------------------------------------------------
 
-def superellipse(th, n):
-    c, s = abs(math.cos(th)), abs(math.sin(th))
-    return (c ** n + s ** n) ** (-1 / n)
+LOOP = 12          # seconds
+ARMS = 3           # disc symmetry; also the number of spiral arms
+RMAX = 212         # outer disc radius (px in the disc plane)
+SQUASH = 0.42      # cos(view tilt): how flat the disc looks
+ROLL = -7          # disc roll on screen (degrees)
+WELL_R0 = 40       # softening radius of the well
+WELL_DEPTH = 78    # depth scale of the well (px on screen)
+RINGS = 34
 
 
-def sculpture(cx, cy, size, rng, sections=72, per=34, dust=380, scan=None):
-    cam = 4.2
-    ct, st = math.cos(TILT), math.sin(TILT)
-    cr, sr = math.cos(ROLL), math.sin(ROLL)
-
-    def project(x, y, z):
-        x, y = x * cr - y * sr, x * sr + y * cr      # roll in the ring's plane
-        y, z = y * ct - z * st, y * st + z * ct      # tilt the ring toward the viewer
-        p = cam / (cam - z)
-        return cx + x * size * p, cy + y * size * p, z
-
-    raw = []
-    for i in range(sections):
-        u = 2 * math.pi * i / sections
-        twist = TURNS * u
-        a = TUBE * (1 + SWELL * math.sin(2 * u + 0.6))
-        for j in range(per):
-            v = 2 * math.pi * (j + rng.random() * 0.25) / per
-            r = a * superellipse(v - twist, SQUARENESS) * 0.82
-            rr = 1 + r * math.cos(v)
-            raw.append(project(rr * math.cos(u), rr * math.sin(u), r * math.sin(v)) + (i == scan,))
-
-    for _ in range(dust):
-        # loose particles orbiting in the ring's plane
-        u = rng.uniform(0, 2 * math.pi)
-        rad = rng.uniform(0.35, 1.85)
-        raw.append(project(rad * math.cos(u), rad * math.sin(u), rng.gauss(0, 0.28)) + (None,))
-
-    zs = [p[2] for p in raw]
-    zmin, zmax = min(zs), max(zs)
-    pts, section = [], []
-    for px, py, pz, flag in raw:
-        d = (pz - zmin) / (zmax - zmin)  # 0 = far, 1 = near
-        if flag is True:
-            section.append((px, py, d))
-        else:
-            pts.append((px, py, d, flag is None))
-    return pts, section
+def well(r):
+    """Screen-space drop of the well surface at radius r (0 at the rim)."""
+    def s(x):
+        return WELL_DEPTH * WELL_R0 / math.sqrt(x * x + WELL_R0 * WELL_R0)
+    return s(r) - s(RMAX)
 
 
-def dot_paths(pts, color, size_bins, alpha_bins, size_range, alpha_range, dust_alpha=0.55):
-    """Batches dots into one stroked path per (size, alpha) bin.
+def dots(points, width, color, opacity):
+    """One stroked path of round dots; vector-effect keeps them round under the squash."""
+    d = "".join(f"M{p}h.01" for p in points)
+    return (f'<path d="{d}" stroke="{color}" stroke-opacity="{opacity}" stroke-width="{width}" '
+            f'stroke-linecap="round" vector-effect="non-scaling-stroke" fill="none"/>')
 
-    Each dot is a near-zero-length segment with round caps. Every dot in a bin
-    shares the same colour, so batching does not change the composited result.
-    """
+
+def binned(parts, color=TEXT):
+    """parts: (x, y, size, alpha) -> one path per (size, alpha) pair."""
     bins = {}
-    for x, y, d, is_dust in pts:
-        smin, smax = size_range
-        amin, amax = alpha_range
-        si = min(size_bins - 1, int(d * size_bins))
-        ai = min(alpha_bins - 1, int((d ** 1.3) * alpha_bins))
-        if is_dust:
-            si = max(0, si - 1)
-        size = smin + (smax - smin) * si / (size_bins - 1)
-        alpha = amin + (amax - amin) * ai / (alpha_bins - 1)
-        if is_dust:
-            alpha *= dust_alpha
-        key = (round(size, 2), round(alpha, 2))
-        bins.setdefault(key, []).append(f"M{f(x)} {f(y)}h.1")
+    for x, y, size, alpha in parts:
+        bins.setdefault((size, alpha), []).append(f"{f(x)} {f(y)}")
+    return "".join(dots(p, s, color, a) for (s, a), p in sorted(bins.items()))
+
+
+def universe(rng, cx, cy):
+    """Returns (defs, css, body, particle_count) for the artwork, rim centred on (cx, cy)."""
+    css = [
+        "@keyframes spin{to{transform:rotate(360deg)}}",
+        "@keyframes rise{to{transform:translateY(-26px)}}",
+        "@keyframes tw{to{opacity:.3}}",
+        "@keyframes pulse{to{transform:scale(1.16);opacity:.75}}",
+        ".s{animation:spin linear infinite}",
+        "@media (prefers-reduced-motion:reduce){*{animation:none!important}}",
+    ]
+    defs = []
+    body = []
+    count = 0
+    sector = 2 * math.pi / ARMS
+    pitch = math.radians(31)
+
+    # Depth: the far half of the disc (top of the screen) is dimmer.
+    defs.append('<linearGradient id="depth" x1="0" y1="-80" x2="0" y2="120" gradientUnits="userSpaceOnUse">'
+                '<stop offset="0" stop-color="#fff" stop-opacity=".38"/>'
+                '<stop offset="1" stop-color="#fff"/></linearGradient>'
+                '<mask id="depthmask" maskUnits="userSpaceOnUse" x="-300" y="-300" width="600" height="600">'
+                '<rect x="-300" y="-300" width="600" height="600" fill="url(#depth)"/></mask>')
+
+    body.append(f'<g transform="translate({cx} {cy}) rotate({ROLL})">')
+    body.append('<g mask="url(#depthmask)">')
+
+    # Spacetime grid: static iso-depth ellipses and meridians of the well.
+    grid = []
+    for r in (52, 92, 132, 172, RMAX):
+        grid.append(f'<ellipse cx="0" cy="{f(well(r))}" rx="{r}" ry="{f(r * SQUASH)}"/>')
+    for i in range(16):
+        th = 2 * math.pi * i / 16
+        pts = []
+        for j in range(25):
+            r = 30 + (RMAX - 30) * j / 24
+            pts.append(f"{f(r * math.cos(th))} {f(r * math.sin(th) * SQUASH + well(r))}")
+        grid.append(f'<path d="M{"L".join(pts)}"/>')
+    body.append(f'<g fill="none" stroke="{MUTED}" stroke-opacity=".2" stroke-width=".8" '
+                f'stroke-dasharray="1 4">{"".join(grid)}</g>')
+
+    # Disc rings
+    spacing = (RMAX - 14) / RINGS
+    for i in range(RINGS):
+        r = 14 + (RMAX - 14) * (i / (RINGS - 1)) ** 1.12
+        k = max(1, min(6, round((r / RMAX) ** -0.8)))
+        n = int(0.12 * r * 2 * math.pi / ARMS) + 4  # particles per sector
+        arm = -math.log(r / 14) / math.tan(pitch)
+        heat = (1 - r / RMAX) ** 0.7
+        white, cyan = [], []
+        for _ in range(n):
+            on_arm = rng.random() < 0.8
+            phi = arm + rng.gauss(0, 0.12 + 0.16 * r / RMAX) if on_arm else rng.uniform(0, sector)
+            rr = r + rng.uniform(-0.5, 0.5) * spacing
+            glow = (0.34 + 0.66 * heat) * rng.uniform(0.6, 1.0)
+            alpha = glow if on_arm else glow * 0.45
+            alpha = max(0.15, round(alpha * 6) / 6)
+            if on_arm and rng.random() < 0.08:
+                size = 2.2  # the occasional bright knot in an arm
+            else:
+                size = rng.choice((0.9, 1.1, 1.4)) if on_arm else rng.choice((0.8, 1.0))
+            hot = on_arm and r > 50 and rng.random() < 0.008
+            for m in range(ARMS):
+                a = phi + m * sector
+                p = (rr * math.cos(a), rr * math.sin(a), 2.0 if hot else round(size, 1), 1 if hot else alpha)
+                (cyan if hot else white).append(p)
+        count += len(white) + len(cyan)
+        dur = f(LOOP * ARMS / k)  # seconds per full turn, i.e. k x 120 degrees per LOOP
+        body.append(f'<g transform="translate(0 {f(well(r))}) scale(1 {SQUASH})">'
+                    f'<g class="s" style="animation-duration:{dur}s">'
+                    f'{binned(white)}{binned(cyan, ACCENT)}</g></g>')
+
+    # Gravitational-wave ripples: cyan rings running outward along the well.
+    stops = []
+    for j in range(17):
+        t = j / 16
+        r = 16 + (RMAX + 14 - 16) * t ** 0.85
+        op = 0 if j in (0, 16) else min(1, t / 0.08) * (1 - t) ** 1.5 * 0.9
+        stops.append(f"{f(t * 100)}%{{transform:translate(0px,{f(well(min(r, RMAX)))}px) "
+                     f"scale({f(r)},{f(r * SQUASH)});opacity:{op:.2f}}}")
+    css.append("@keyframes wave{" + "".join(stops) + "}")
+    css.append(f".wv{{animation:wave {LOOP // 2}s cubic-bezier(.3,.1,.5,1) infinite}}")
+    ring = [f"{math.cos(a):.3f} {math.sin(a):.3f}" for a in (2 * math.pi * q / 120 for q in range(120))]
+    for delay in (0, LOOP // 4):
+        body.append(f'<g class="wv" style="animation-delay:-{delay}s">{dots(ring, 1.5, ACCENT, ".9")}</g>')
+    body.append('</g>')  # depth mask
+
+    # Polar jet: two strands of a helix rising out of the core. The helix is
+    # periodic in its pitch, so moving it up by one pitch loops seamlessly.
+    core_y = well(0)
+    defs.append(f'<linearGradient id="jetfade" x1="0" y1="{f(core_y)}" x2="0" y2="-110" gradientUnits="userSpaceOnUse">'
+                '<stop offset="0" stop-color="#fff" stop-opacity="0"/>'
+                '<stop offset=".2" stop-color="#fff" stop-opacity=".6"/>'
+                '<stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient>'
+                '<mask id="jetmask" maskUnits="userSpaceOnUse" x="-60" y="-200" width="120" height="400">'
+                '<rect x="-60" y="-200" width="120" height="400" fill="url(#jetfade)"/></mask>')
+    jet = []
+    pitch_px = 26
+    for strand in (0, math.pi):
+        th = 0.0
+        while True:
+            y = core_y + pitch_px - th / (2 * math.pi) * pitch_px
+            if y < -110:
+                break
+            front = math.sin(th + strand) > 0
+            jet.append((5.5 * math.cos(th + strand), y, 1.6 if front else 1.0, 0.85 if front else 0.35))
+            th += 2 * math.pi / 9
+    count += len(jet)
+    body.append(f'<g mask="url(#jetmask)"><g style="animation:rise {LOOP // 3}s linear infinite">'
+                f'{binned(jet)}</g></g>')
+
+    # Core: a dense, slowly breathing knot with a faint glow.
+    defs.append('<radialGradient id="glow"><stop offset="0" stop-color="#fff" stop-opacity=".22"/>'
+                '<stop offset="1" stop-color="#fff" stop-opacity="0"/></radialGradient>')
+    core = []
+    for _ in range(70):
+        a = rng.uniform(0, 2 * math.pi)
+        rad = abs(rng.gauss(0, 4.2))
+        core.append((rad * math.cos(a), rad * math.sin(a) * 0.7, rng.choice((1.2, 1.6, 2.0)),
+                     rng.choice((0.5, 0.75, 1.0))))
+    count += len(core)
+    body.append(f'<g transform="translate(0 {f(core_y)})">'
+                f'<g style="animation:pulse {LOOP // 4}s ease-in-out infinite alternate">'
+                f'<circle r="22" fill="url(#glow)"/>{binned(core)}</g></g>')
+
+    # Two probes on an inclined orbit with comet tails. The pair is two-fold
+    # symmetric, so half a revolution per LOOP is seamless.
+    body.append(f'<g transform="translate(0 {f(core_y - 40)}) rotate(14) scale(1 .22)">')
+    body.append(f'<ellipse rx="196" ry="196" fill="none" stroke="{ACCENT}" stroke-opacity=".22" '
+                f'stroke-width=".8" stroke-dasharray="1 5" vector-effect="non-scaling-stroke"/>')
+    probe = []
+    for side in (0, math.pi):
+        for t in range(14):
+            a = side - math.radians(t * 1.6)
+            probe.append((196 * math.cos(a), 196 * math.sin(a), round(2.6 - t * 0.12, 1),
+                          round(max(0.1, 1 - t / 13), 2)))
+    count += len(probe)
+    body.append(f'<g class="s" style="animation-duration:{LOOP * 2}s">{binned(probe, ACCENT)}</g></g>')
+    body.append('</g>')  # frame
+    return "".join(defs), "".join(css), "".join(body), count
+
+
+def starfield(rng, x0, y0, x1, y1, n=240):
+    """Faint background particles in three groups that twinkle out of phase."""
+    groups = [[], [], []]
+    for _ in range(n):
+        groups[rng.randrange(3)].append((rng.uniform(x0, x1), rng.uniform(y0, y1),
+                                         rng.choice((0.8, 1.0, 1.3)), rng.choice((0.15, 0.25, 0.4))))
     out = []
-    for (size, alpha), segs in sorted(bins.items(), key=lambda kv: kv[0][1]):
-        out.append(f'<path d="{"".join(segs)}" stroke="{color}" stroke-opacity="{alpha}" '
-                   f'stroke-width="{size}" stroke-linecap="round" fill="none"/>')
-    return "".join(out)
+    for i, g in enumerate(groups):
+        out.append(f'<g style="animation:tw {LOOP // 2}s ease-in-out infinite alternate;'
+                   f'animation-delay:-{i * LOOP // 6}s">{binned(g)}</g>')
+    return "".join(out), n
 
 
 def cross(x, y, s=5, color=DIM):
@@ -241,30 +359,21 @@ def hero():
 
     # Art first, so typography sits on top.
     fx0, fy0, fx1, fy1 = 690, 96, 1144, 398
-    acx, acy, asz = 928, 246, 134
-    sec, n_sec = 22, 72
-    pts, section = sculpture(acx, acy, asz, rng, sections=n_sec, scan=sec)
-    sx = sum(p[0] for p in section) / len(section)
-    sy = max(p[1] for p in section)
+    defs, css, art, n = universe(rng, 920, 226)
+    stars, n_stars = starfield(rng, fx0, fy0, fx1, fy1)
 
-    b.append(f'<clipPath id="fig"><rect x="{fx0}" y="{fy0}" width="{fx1 - fx0}" height="{fy1 - fy0}"/></clipPath>')
-    b.append(f'<g clip-path="url(#fig)">')
-    b.append(dot_paths(pts, TEXT, 4, 7, (1.0, 2.6), (0.08, 0.92)))
-    b.append(dot_paths([(x, y, d, False) for x, y, d in section], ACCENT, 3, 3, (1.8, 3.0), (0.6, 1.0)))
-    b.append('</g>')
+    b.append(f'<style>{css}</style>')
+    b.append(f'<defs>{defs}<clipPath id="fig"><rect x="{fx0}" y="{fy0}" width="{fx1 - fx0}" '
+             f'height="{fy1 - fy0}"/></clipPath></defs>')
+    b.append(f'<g clip-path="url(#fig)">{stars}{art}</g>')
 
     # Figure frame: registration marks and annotations
     for x, y in ((fx0, fy0), (fx1, fy0), (fx0, fy1), (fx1, fy1)):
         b.append(cross(x, y))
     b.append(text(fx0 + 12, fy0 + 4, "FIG. 01", 11, DIM, spacing=1.6))
-    b.append(text(fx1 - 12, fy0 + 4, "TWISTED SECTION TORUS", 11, DIM, anchor="end", spacing=1.6))
-    b.append(text(fx1 - 12, fy1 + 4, f"N={len(pts) + len(section)}", 11, DIM, anchor="end", spacing=1.6))
-
-    # Callout for the highlighted section
-    lx, ly = fx0 + 12, fy1 - 14
-    b.append(f'<path d="M{lx + 118} {ly - 4}H{f(sx - 14)}L{f(sx)} {f(sy + 8)}" stroke="{ACCENT}" '
-             f'stroke-opacity=".5" stroke-width="1" fill="none"/>')
-    b.append(text(lx, ly, f"SECTION {sec}/{n_sec}", 11, ACCENT, spacing=1.4))
+    b.append(text(fx1 - 12, fy0 + 4, "ACCRETION FIELD", 11, DIM, anchor="end", spacing=1.6))
+    b.append(text(fx0 + 12, fy1 + 4, "GRAVITY WELL · 3 ARMS", 11, DIM, spacing=1.6))
+    b.append(text(fx1 - 12, fy1 + 4, f"N={n + n_stars:,} · T={LOOP}S", 11, DIM, anchor="end", spacing=1.6))
 
     # Top metadata row + rule
     b.append(text(L, 46, "DIMALAB / ENGINEERING", 13, MUTED, spacing=2.6))
@@ -288,7 +397,7 @@ def hero():
 
     title = "DimaLab. — Software developer"
     desc = ("Editorial banner: the DimaLab. wordmark, 'Software developer. Building tools, engines and "
-            "experiments.', a monochrome point-cloud sculpture of a twisted torus with one cross-section highlighted in cyan, and "
+            "experiments.', an animated particle universe: a three-armed accretion disc orbiting in a gravity well, with cyan ripples, a rising jet and two orbiting probes, and "
             "the themes engine tooling, Windows utilities and Minecraft systems.")
     return svg(W_, H_, title, desc, "".join(b), "hero")
 
