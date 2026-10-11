@@ -1,19 +1,23 @@
-"""Renders a GitHub-style contribution calendar for the current year from real data.
+"""Renders a GitHub-style contribution calendar from real data.
 
-Fetches daily contribution counts for one calendar year (January 1 to
-December 31, UTC) from the GitHub GraphQL API and writes two SVGs:
+By default it mirrors the calendar on the GitHub profile page: the last year of
+daily contribution counts, as returned by the GitHub GraphQL API. With --year it
+renders one calendar year (January 1 to December 31, UTC) instead; days that
+have not happened yet are then drawn as empty outlines, so they cannot be
+mistaken for days without contributions. Two SVGs are written:
 
-    assets/activity.svg         the whole year in one row of weeks (desktop)
-    assets/activity-mobile.svg  the same year as two stacked half-years (narrow screens)
+    assets/activity.svg         the whole range in one row of weeks (desktop)
+    assets/activity-mobile.svg  the same range as two stacked halves (narrow screens)
 
-Days that have not happened yet are drawn as empty outlines, so they cannot be
-mistaken for days without contributions.
+Private contributions are included only if "Private contributions" is enabled in
+the profile's contribution settings, which is also what GitHub shows visitors.
 
 Standard library only. Needs a token in GITHUB_TOKEN (or GH_TOKEN); in GitHub
 Actions the built-in token is enough because the data is public.
 
     python assets/src/contributions.py --login LomakoDima
-    python assets/src/contributions.py --input calendar.json --year 2026   # render saved API output
+    python assets/src/contributions.py --year 2026                     # one calendar year
+    python assets/src/contributions.py --input calendar.json           # render saved API output
 
 If the request fails or the response does not look like a complete calendar
 for the year, the script exits non-zero and leaves the existing SVGs untouched.
@@ -32,18 +36,11 @@ from pathlib import Path
 
 ASSETS = Path(__file__).resolve().parent.parent
 API = "https://api.github.com/graphql"
-QUERY = """
-query($login: String!, $from: DateTime!, $to: DateTime!) {
-  user(login: $login) {
-    contributionsCollection(from: $from, to: $to) {
-      contributionCalendar {
-        totalContributions
-        weeks { contributionDays { date weekday contributionCount contributionLevel } }
-      }
-    }
-  }
-}
-"""
+CALENDAR = ("contributionCalendar { totalContributions "
+            "weeks { contributionDays { date weekday contributionCount contributionLevel } } }")
+QUERY_LAST_YEAR = "query($login: String!) { user(login: $login) { contributionsCollection { %s } } }" % CALENDAR
+QUERY_YEAR = ("query($login: String!, $from: DateTime!, $to: DateTime!) "
+              "{ user(login: $login) { contributionsCollection(from: $from, to: $to) { %s } } }" % CALENDAR)
 
 # Same design tokens as build.py, plus GitHub's dark-theme contribution greens.
 BG = "#0A0A0B"
@@ -67,9 +64,13 @@ class CalendarError(Exception):
     pass
 
 
-def fetch(login, token, year, attempts=3):
-    variables = {"login": login, "from": f"{year}-01-01T00:00:00Z", "to": f"{year}-12-31T23:59:59Z"}
-    body = json.dumps({"query": QUERY, "variables": variables}).encode()
+def fetch(login, token, year=None, attempts=3):
+    if year:
+        query = QUERY_YEAR
+        variables = {"login": login, "from": f"{year}-01-01T00:00:00Z", "to": f"{year}-12-31T23:59:59Z"}
+    else:
+        query, variables = QUERY_LAST_YEAR, {"login": login}
+    body = json.dumps({"query": query, "variables": variables}).encode()
     req = urllib.request.Request(API, data=body, method="POST", headers={
         "Authorization": f"bearer {token}",
         "Content-Type": "application/json",
@@ -89,8 +90,8 @@ def fetch(login, token, year, attempts=3):
         time.sleep(5 * attempt)
 
 
-def parse(payload, year):
-    """Validates the API response for one calendar year and returns (days, total). Raises CalendarError."""
+def parse(payload, year=None):
+    """Validates the API response (the last year, or one calendar year) and returns (days, total)."""
     if not isinstance(payload, dict):
         raise CalendarError("response is not a JSON object")
     if payload.get("errors"):
@@ -118,10 +119,13 @@ def parse(payload, year):
                 raise CalendarError(f"inconsistent day: {d!r}")
             days.append({"date": date, "count": count, "level": level})
 
-    expected = 366 if calendar.isleap(year) else 365
-    if len(days) != expected or days[0]["date"] != dt.date(year, 1, 1) or days[-1]["date"] != dt.date(year, 12, 31):
-        first, last = (days[0]["date"], days[-1]["date"]) if days else (None, None)
-        raise CalendarError(f"expected {year}-01-01..{year}-12-31 ({expected} days), got {first}..{last} ({len(days)})")
+    if year:
+        expected = 366 if calendar.isleap(year) else 365
+        if len(days) != expected or days[0]["date"] != dt.date(year, 1, 1) or days[-1]["date"] != dt.date(year, 12, 31):
+            first, last = (days[0]["date"], days[-1]["date"]) if days else (None, None)
+            raise CalendarError(f"expected {year}-01-01..{year}-12-31 ({expected} days), got {first}..{last} ({len(days)})")
+    elif not 360 <= len(days) <= 371:
+        raise CalendarError(f"expected about a year of days, got {len(days)}")
     for a, b in zip(days, days[1:]):
         if (b["date"] - a["date"]).days != 1:
             raise CalendarError(f"gap or disorder in dates between {a['date']} and {b['date']}")
@@ -207,10 +211,17 @@ def legend(out, right, y, cell, gap, ts):
 
 
 def render(days, total, login, year, today, mobile=False):
+    """year=None renders the last-year range exactly as the API returned it."""
     width, side, ts, gap, label_w = (600, 24, 15, 4, 46) if mobile else (900, 40, 11, 3.5, 34)
     L, R = side, width - side
     gx = L + label_w
-    halves = ([d for d in days if d["date"].month <= 6], [d for d in days if d["date"].month > 6])
+    if year:
+        halves = ([d for d in days if d["date"].month <= 6], [d for d in days if d["date"].month > 6])
+    else:
+        # Split at a week boundary so both halves keep whole Sunday-first columns.
+        cols = columns(days)
+        cut = next(d for d in cols[(len(cols) + 1) // 2] if d)["date"]
+        halves = ([d for d in days if d["date"] < cut], [d for d in days if d["date"] >= cut])
     blocks = halves if mobile else (days,)
     ncols = max(len(columns(b)) for b in blocks)
     step = (R - gx + gap) / ncols
@@ -222,7 +233,8 @@ def render(days, total, login, year, today, mobile=False):
     head = 52 if mobile else 46
     rule = head + 20
     out.append(text(L, head, "ACTIVITY", ts + 2, ACCENT, spacing=2.6))
-    out.append(text(R, head, f"{plural(total, 'CONTRIBUTION').upper()} IN {year}", ts + 2, MUTED, "end", 2.6))
+    period = f"IN {year}" if year else "IN THE LAST YEAR"
+    out.append(text(R, head, f"{plural(total, 'CONTRIBUTION').upper()} {period}", ts + 2, MUTED, "end", 2.6))
     out.append(f'<path d="M{L} {rule}H{R}" stroke="{LINE}" stroke-width="1"/>')
 
     y = rule + (34 if mobile else 30)
@@ -232,11 +244,14 @@ def render(days, total, login, year, today, mobile=False):
         y += 10 + grid_h + (40 if mobile else 0)
     foot = y + (2 if mobile else 34)
 
-    through = f"through {short(min(today, days[-1]['date']))}"
+    start, end = days[0]["date"], days[-1]["date"]
+    through = f"through {short(min(today, end))}"
     if mobile:
         note = f"{through} · GitHub API"
-    else:
+    elif year:
         note = f"Jan 1 – Dec 31, {year} · {through} · via GitHub GraphQL API"
+    else:
+        note = f"{short(start)}, {start.year} – {short(end)}, {end.year} · via GitHub GraphQL API"
     out.append(text(L, foot, note, ts, DIM))
     legend(out, R, foot, cell if not mobile else cell * 0.8, gap, ts)
     height = round(foot + 26)
@@ -245,11 +260,17 @@ def render(days, total, login, year, today, mobile=False):
     per_month = {}
     for d in days:
         if d["date"] <= today or d["count"]:
-            per_month[MONTHS[d["date"].month - 1]] = per_month.get(MONTHS[d["date"].month - 1], 0) + d["count"]
+            key = MONTHS[d["date"].month - 1] + ("" if year else f" {d['date'].year}")
+            per_month[key] = per_month.get(key, 0) + d["count"]
     breakdown = "; ".join(f"{k}: {v}" for k, v in per_month.items())
-    title = f"{login} GitHub contributions in {year}, {through}: {plural(total, 'contribution')}"
-    desc = (f"Contribution calendar for {year}, one cell per day, darker to brighter green by activity; "
-            f"days still ahead are drawn as outlines. By month: {breakdown}.")
+    if year:
+        title = f"{login} GitHub contributions in {year}, {through}: {plural(total, 'contribution')}"
+        desc = (f"Contribution calendar for {year}, one cell per day, darker to brighter green by activity; "
+                f"days still ahead are drawn as outlines. By month: {breakdown}.")
+    else:
+        title = (f"{login} GitHub contributions in the last year, {start.isoformat()} to {end.isoformat()}: "
+                 f"{plural(total, 'contribution')}")
+        desc = f"Contribution calendar, one cell per day, darker to brighter green by activity. By month: {breakdown}."
     slug = "actm" if mobile else "act"
     return (f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
             f'viewBox="0 0 {width} {height}" role="img" aria-labelledby="{slug}-t {slug}-d">'
@@ -267,7 +288,7 @@ def main():
     today_utc = dt.datetime.now(dt.timezone.utc).date()
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--login", default=os.environ.get("GITHUB_REPOSITORY_OWNER", "LomakoDima"))
-    ap.add_argument("--year", type=int, default=today_utc.year, help="calendar year (default: current UTC year)")
+    ap.add_argument("--year", type=int, help="render one calendar year instead of the last year (GitHub's default view)")
     ap.add_argument("--today", type=dt.date.fromisoformat, default=today_utc,
                     help="treat this date as today (default: current UTC date); later days render as outlines")
     ap.add_argument("--input", help="render from a saved GraphQL JSON response instead of calling the API")
@@ -295,8 +316,8 @@ def main():
     out = Path(args.out)
     write_atomic(out / "activity.svg", desktop)
     write_atomic(out / "activity-mobile.svg", mobile)
-    print(f"{args.year}: {total} contributions, {sum(1 for d in days if d['count'])} active days, "
-          f"through {min(args.today, days[-1]['date'])}")
+    print(f"{args.year or 'last year'} ({days[0]['date']} .. {days[-1]['date']}): {total} contributions, "
+          f"{sum(1 for d in days if d['count'])} active days")
     return 0
 
 
