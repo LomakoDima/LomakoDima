@@ -51,7 +51,7 @@ Software close to the system — taskbars, render pipelines, mod loaders — bui
 
 <picture>
   <source media="(max-width: 600px)" srcset="https://github.com/LomakoDima/LomakoDima/raw/main/assets/activity-mobile.svg">
-  <img src="assets/activity.svg" width="100%" alt="GitHub contribution calendar for the last year, one cell per day, shaded by daily contribution count. Generated from the GitHub GraphQL API.">
+  <img src="assets/activity.svg" width="100%" alt="GitHub contribution calendar for the current year, one cell per day, shaded by daily contribution count; days still ahead are drawn as outlines. Generated from the GitHub GraphQL API.">
 </picture>
 
 <sub>Real daily counts from GitHub's GraphQL API, re-rendered every day by a workflow in this repository. GitHub's own calendar, just below, remains the record.</sub>

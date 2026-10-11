@@ -1,22 +1,26 @@
-"""Renders a GitHub-style contribution calendar from real data.
+"""Renders a GitHub-style contribution calendar for the current year from real data.
 
-Fetches the last year of daily contribution counts from the GitHub GraphQL API
-and writes two SVGs:
+Fetches daily contribution counts for one calendar year (January 1 to
+December 31, UTC) from the GitHub GraphQL API and writes two SVGs:
 
-    assets/activity.svg         full year (desktop)
-    assets/activity-mobile.svg  last 26 weeks, larger cells (narrow screens)
+    assets/activity.svg         the whole year in one row of weeks (desktop)
+    assets/activity-mobile.svg  the same year as two stacked half-years (narrow screens)
+
+Days that have not happened yet are drawn as empty outlines, so they cannot be
+mistaken for days without contributions.
 
 Standard library only. Needs a token in GITHUB_TOKEN (or GH_TOKEN); in GitHub
 Actions the built-in token is enough because the data is public.
 
     python assets/src/contributions.py --login LomakoDima
-    python assets/src/contributions.py --input calendar.json   # render saved API output
+    python assets/src/contributions.py --input calendar.json --year 2026   # render saved API output
 
-If the request fails or the response does not look like a complete calendar,
-the script exits non-zero and leaves the existing SVGs untouched.
+If the request fails or the response does not look like a complete calendar
+for the year, the script exits non-zero and leaves the existing SVGs untouched.
 """
 
 import argparse
+import calendar
 import datetime as dt
 import json
 import os
@@ -29,9 +33,9 @@ from pathlib import Path
 ASSETS = Path(__file__).resolve().parent.parent
 API = "https://api.github.com/graphql"
 QUERY = """
-query($login: String!) {
+query($login: String!, $from: DateTime!, $to: DateTime!) {
   user(login: $login) {
-    contributionsCollection {
+    contributionsCollection(from: $from, to: $to) {
       contributionCalendar {
         totalContributions
         weeks { contributionDays { date weekday contributionCount contributionLevel } }
@@ -44,10 +48,10 @@ query($login: String!) {
 # Same design tokens as build.py, plus GitHub's dark-theme contribution greens.
 BG = "#0A0A0B"
 LINE = "#25272C"
-TEXT = "#F4F5F7"
 MUTED = "#8B9099"
 DIM = "#5A5E66"
 ACCENT = "#3FD0FF"
+FUTURE = "#1E232B"
 LEVELS = {
     "NONE": "#151B23",
     "FIRST_QUARTILE": "#033A16",
@@ -63,8 +67,9 @@ class CalendarError(Exception):
     pass
 
 
-def fetch(login, token, attempts=3):
-    body = json.dumps({"query": QUERY, "variables": {"login": login}}).encode()
+def fetch(login, token, year, attempts=3):
+    variables = {"login": login, "from": f"{year}-01-01T00:00:00Z", "to": f"{year}-12-31T23:59:59Z"}
+    body = json.dumps({"query": QUERY, "variables": variables}).encode()
     req = urllib.request.Request(API, data=body, method="POST", headers={
         "Authorization": f"bearer {token}",
         "Content-Type": "application/json",
@@ -84,8 +89,8 @@ def fetch(login, token, attempts=3):
         time.sleep(5 * attempt)
 
 
-def parse(payload):
-    """Validates the API response and returns (days, total). Raises CalendarError."""
+def parse(payload, year):
+    """Validates the API response for one calendar year and returns (days, total). Raises CalendarError."""
     if not isinstance(payload, dict):
         raise CalendarError("response is not a JSON object")
     if payload.get("errors"):
@@ -99,7 +104,7 @@ def parse(payload):
     if not isinstance(total, int) or total < 0:
         raise CalendarError(f"invalid total: {total!r}")
     if not 52 <= len(weeks) <= 54:
-        raise CalendarError(f"expected about a year of weeks, got {len(weeks)}")
+        raise CalendarError(f"expected a year of weeks, got {len(weeks)}")
 
     days = []
     for week in weeks:
@@ -113,8 +118,10 @@ def parse(payload):
                 raise CalendarError(f"inconsistent day: {d!r}")
             days.append({"date": date, "count": count, "level": level})
 
-    if len(days) < 360:
-        raise CalendarError(f"only {len(days)} days in the calendar")
+    expected = 366 if calendar.isleap(year) else 365
+    if len(days) != expected or days[0]["date"] != dt.date(year, 1, 1) or days[-1]["date"] != dt.date(year, 12, 31):
+        first, last = (days[0]["date"], days[-1]["date"]) if days else (None, None)
+        raise CalendarError(f"expected {year}-01-01..{year}-12-31 ({expected} days), got {first}..{last} ({len(days)})")
     for a, b in zip(days, days[1:]):
         if (b["date"] - a["date"]).days != 1:
             raise CalendarError(f"gap or disorder in dates between {a['date']} and {b['date']}")
@@ -139,14 +146,12 @@ def month_labels(cols, min_gap=3):
     labels = []
     prev = None
     for i, col in enumerate(cols):
-        first = next(d for d in col if d)
-        m = first["date"].month
+        m = next(d for d in col if d)["date"].month
         if m != prev:
             labels.append((i, MONTHS[m - 1]))
             prev = m
-    # Drop a leading label that would collide with the next one.
     if len(labels) > 1 and labels[1][0] - labels[0][0] < min_gap:
-        labels.pop(0)
+        labels.pop(0)  # a leading label that would collide with the next one
     return labels
 
 
@@ -154,90 +159,102 @@ def plural(n, word):
     return f"{n:,} {word}{'' if n == 1 else 's'}"
 
 
-def render(days, total, login, weeks=None, width=900, cell_gap=3.5, text_size=11, side=40, mobile=False):
+def short(d):
+    return f"{d:%b} {d.day}"
+
+
+def text(x, y, s, size, fill, anchor=None, spacing=None):
+    a = f' text-anchor="{anchor}"' if anchor else ""
+    ls = f' letter-spacing="{spacing}"' if spacing else ""
+    return f'<text x="{x:.1f}" y="{y:.1f}" font-family="{MONO}" font-size="{size}" fill="{fill}"{a}{ls}>{s}</text>'
+
+
+def grid(out, days, today, gx, month_y, gy, step, gap, ts, label_x, col0=0):
+    """Draws month labels, weekday labels and one block of week columns. Returns the column count."""
     cols = columns(days)
-    if weeks:
-        cols = cols[-weeks:]
-    shown = [d for c in cols for d in c if d]
-    start, end = shown[0]["date"], shown[-1]["date"]
-
-    L, R = side, width - side
-    label_w = 34 if not mobile else 46
-    gx = L + label_w
-    step = (R - gx + cell_gap) / len(cols)
-    cell = step - cell_gap
-    head = 46 if not mobile else 52
-    rule = head + 20
-    month_y = rule + 30
-    gy = month_y + 10
-    grid_h = 7 * step - cell_gap
-    foot = gy + grid_h + 34
-    height = round(foot + 26)
-    ts = text_size
-
-    out = []
-    out.append(f'<style>@keyframes in{{from{{opacity:0}}}}.w{{animation:in .5s ease-out backwards}}'
-               f'@media (prefers-reduced-motion:reduce){{.w{{animation:none}}}}</style>')
-    out.append(f'<rect width="{width}" height="{height}" fill="{BG}"/>')
-
-    # Header row, rule
-    out.append(f'<text x="{L}" y="{head}" font-family="{MONO}" font-size="{ts + 2}" fill="{ACCENT}" '
-               f'letter-spacing="2.6">ACTIVITY</text>')
-    right = "LAST 26 WEEKS" if mobile else f"{plural(total, 'CONTRIBUTION').upper()} IN THE LAST YEAR"
-    out.append(f'<text x="{R}" y="{head}" font-family="{MONO}" font-size="{ts + 2}" fill="{MUTED}" '
-               f'text-anchor="end" letter-spacing="2.6">{right}</text>')
-    out.append(f'<path d="M{L} {rule}H{R}" stroke="{LINE}" stroke-width="1"/>')
-
-    # Month and weekday labels
+    cell = step - gap
     for i, name in month_labels(cols):
-        out.append(f'<text x="{gx + i * step:.1f}" y="{month_y}" font-family="{MONO}" font-size="{ts}" '
-                   f'fill="{MUTED}">{name}</text>')
+        out.append(text(gx + i * step, month_y, name, ts, MUTED))
     for row, name in ((1, "Mon"), (3, "Wed"), (5, "Fri")):
-        out.append(f'<text x="{L}" y="{gy + row * step + cell * 0.8:.1f}" font-family="{MONO}" '
-                   f'font-size="{ts}" fill="{DIM}">{name}</text>')
-
-    # Cells: one group per week column, revealed left to right on load.
+        out.append(text(label_x, gy + row * step + cell * 0.8, name, ts, DIM))
     for i, col in enumerate(cols):
         x = gx + i * step
         rects = []
         for row, d in enumerate(col):
             if d is None:
-                continue  # before the range start or in the future, as on GitHub
-            rects.append(f'<rect x="{x:.1f}" y="{gy + row * step:.1f}" width="{cell:.1f}" height="{cell:.1f}" '
-                         f'rx="2" fill="{LEVELS[d["level"]]}"/>')
-        out.append(f'<g class="w" style="animation-delay:{i * 0.012:.3f}s">{"".join(rects)}</g>')
+                continue  # outside the year
+            y = gy + row * step
+            if d["date"] > today and d["count"] == 0:
+                # Not happened yet: an outline, never a "zero contributions" cell.
+                rects.append(f'<rect x="{x + .5:.1f}" y="{y + .5:.1f}" width="{cell - 1:.1f}" height="{cell - 1:.1f}" '
+                             f'rx="2" fill="none" stroke="{FUTURE}"/>')
+            else:
+                rects.append(f'<rect x="{x:.1f}" y="{y:.1f}" width="{cell:.1f}" height="{cell:.1f}" rx="2" '
+                             f'fill="{LEVELS[d["level"]]}"/>')
+        out.append(f'<g class="w" style="animation-delay:{(col0 + i) * 0.012:.3f}s">{"".join(rects)}</g>')
+    return len(cols)
 
-    # Footer: source on the left, Less -> More legend on the right
-    if mobile:
-        note = f"{plural(sum(d['count'] for d in shown), 'contribution')} in 26 weeks"
-    else:
-        note = f"{start:%b} {start.day}, {start.year} – {end:%b} {end.day}, {end.year} · via GitHub GraphQL API"
-    out.append(f'<text x="{L}" y="{foot}" font-family="{MONO}" font-size="{ts}" fill="{DIM}">{note}</text>')
-    # Legend, on one line like GitHub's: Less [] [] [] [] [] More
-    lc = cell * (0.85 if not mobile else 0.7)
-    more_x = R - ts * 0.6 * 4
-    lx = more_x - 6 - 5 * (lc + cell_gap) + cell_gap
-    out.append(f'<text x="{lx - 6:.1f}" y="{foot}" font-family="{MONO}" font-size="{ts}" fill="{DIM}" '
-               f'text-anchor="end">Less</text>')
+
+def legend(out, right, y, cell, gap, ts):
+    """Less [] [] [] [] [] More, right-aligned on one line like GitHub's."""
+    lc = cell * 0.85
+    lx = right - ts * 0.6 * 4 - 6 - 5 * (lc + gap) + gap
+    out.append(text(lx - 6, y, "Less", ts, DIM, "end"))
     for j, color in enumerate(LEVELS.values()):
-        out.append(f'<rect x="{lx + j * (lc + cell_gap):.1f}" y="{foot - lc + 1:.1f}" width="{lc:.1f}" '
-                   f'height="{lc:.1f}" rx="2" fill="{color}"/>')
-    out.append(f'<text x="{R}" y="{foot}" font-family="{MONO}" font-size="{ts}" fill="{DIM}" '
-               f'text-anchor="end">More</text>')
+        out.append(f'<rect x="{lx + j * (lc + gap):.1f}" y="{y - lc + 1:.1f}" width="{lc:.1f}" height="{lc:.1f}" '
+                   f'rx="2" fill="{color}"/>')
+    out.append(text(right, y, "More", ts, DIM, "end"))
 
-    # Accessible summary: totals per month, in date order.
+
+def render(days, total, login, year, today, mobile=False):
+    width, side, ts, gap, label_w = (600, 24, 15, 4, 46) if mobile else (900, 40, 11, 3.5, 34)
+    L, R = side, width - side
+    gx = L + label_w
+    halves = ([d for d in days if d["date"].month <= 6], [d for d in days if d["date"].month > 6])
+    blocks = halves if mobile else (days,)
+    ncols = max(len(columns(b)) for b in blocks)
+    step = (R - gx + gap) / ncols
+    cell = step - gap
+    grid_h = 7 * step - gap
+
+    out = [f'<style>@keyframes in{{from{{opacity:0}}}}.w{{animation:in .5s ease-out backwards}}'
+           f'@media (prefers-reduced-motion:reduce){{.w{{animation:none}}}}</style>']
+    head = 52 if mobile else 46
+    rule = head + 20
+    out.append(text(L, head, "ACTIVITY", ts + 2, ACCENT, spacing=2.6))
+    out.append(text(R, head, f"{plural(total, 'CONTRIBUTION').upper()} IN {year}", ts + 2, MUTED, "end", 2.6))
+    out.append(f'<path d="M{L} {rule}H{R}" stroke="{LINE}" stroke-width="1"/>')
+
+    y = rule + (34 if mobile else 30)
+    col0 = 0
+    for block in blocks:
+        col0 += grid(out, block, today, gx, y, y + 10, step, gap, ts, L, col0)
+        y += 10 + grid_h + (40 if mobile else 0)
+    foot = y + (2 if mobile else 34)
+
+    through = f"through {short(min(today, days[-1]['date']))}"
+    if mobile:
+        note = f"{through} · GitHub API"
+    else:
+        note = f"Jan 1 – Dec 31, {year} · {through} · via GitHub GraphQL API"
+    out.append(text(L, foot, note, ts, DIM))
+    legend(out, R, foot, cell if not mobile else cell * 0.8, gap, ts)
+    height = round(foot + 26)
+
+    # Accessible summary: totals per month that has started.
     per_month = {}
-    for d in shown:
-        key = f"{d['date']:%b} {d['date'].year}"
-        per_month[key] = per_month.get(key, 0) + d["count"]
+    for d in days:
+        if d["date"] <= today or d["count"]:
+            per_month[MONTHS[d["date"].month - 1]] = per_month.get(MONTHS[d["date"].month - 1], 0) + d["count"]
     breakdown = "; ".join(f"{k}: {v}" for k, v in per_month.items())
-    title = (f"{login} GitHub contributions, {start.isoformat()} to {end.isoformat()}: "
-             f"{plural(sum(d['count'] for d in shown), 'contribution')}")
-    desc = f"Contribution calendar, one cell per day, darker to brighter green by activity. By month: {breakdown}."
+    title = f"{login} GitHub contributions in {year}, {through}: {plural(total, 'contribution')}"
+    desc = (f"Contribution calendar for {year}, one cell per day, darker to brighter green by activity; "
+            f"days still ahead are drawn as outlines. By month: {breakdown}.")
     slug = "actm" if mobile else "act"
     return (f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
             f'viewBox="0 0 {width} {height}" role="img" aria-labelledby="{slug}-t {slug}-d">'
-            f'<title id="{slug}-t">{title}</title><desc id="{slug}-d">{desc}</desc>{"".join(out)}</svg>\n')
+            f'<title id="{slug}-t">{title}</title><desc id="{slug}-d">{desc}</desc>'
+            f'<rect width="{width}" height="{height}" fill="{BG}"/>{"".join(out)}</svg>\n')
 
 
 def write_atomic(path, data):
@@ -247,8 +264,12 @@ def write_atomic(path, data):
 
 
 def main():
+    today_utc = dt.datetime.now(dt.timezone.utc).date()
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--login", default=os.environ.get("GITHUB_REPOSITORY_OWNER", "LomakoDima"))
+    ap.add_argument("--year", type=int, default=today_utc.year, help="calendar year (default: current UTC year)")
+    ap.add_argument("--today", type=dt.date.fromisoformat, default=today_utc,
+                    help="treat this date as today (default: current UTC date); later days render as outlines")
     ap.add_argument("--input", help="render from a saved GraphQL JSON response instead of calling the API")
     ap.add_argument("--out", default=str(ASSETS), help="output directory (default: assets/)")
     args = ap.parse_args()
@@ -263,10 +284,10 @@ def main():
             token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
             if not token:
                 raise CalendarError("set GITHUB_TOKEN (or GH_TOKEN) to query the GitHub API")
-            payload = fetch(args.login, token)
-        days, total = parse(payload)
-        desktop = render(days, total, args.login)
-        mobile = render(days, total, args.login, weeks=26, width=600, cell_gap=4, text_size=15, side=24, mobile=True)
+            payload = fetch(args.login, token, args.year)
+        days, total = parse(payload, args.year)
+        desktop = render(days, total, args.login, args.year, args.today)
+        mobile = render(days, total, args.login, args.year, args.today, mobile=True)
     except CalendarError as e:
         print(f"error: {e}. Existing calendar left unchanged.", file=sys.stderr)
         return 1
@@ -274,8 +295,8 @@ def main():
     out = Path(args.out)
     write_atomic(out / "activity.svg", desktop)
     write_atomic(out / "activity-mobile.svg", mobile)
-    print(f"{days[0]['date']} .. {days[-1]['date']}: {total} contributions, "
-          f"{sum(1 for d in days if d['count'])} active days")
+    print(f"{args.year}: {total} contributions, {sum(1 for d in days if d['count'])} active days, "
+          f"through {min(args.today, days[-1]['date'])}")
     return 0
 
 
