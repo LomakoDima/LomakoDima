@@ -1,5 +1,5 @@
 """Generates the profile's SVG assets (StoryModEngine plate, footer) and the shared
-wordmark geometry and design tokens. The animated hero is rendered by ascii_hero.py.
+wordmark geometry and design tokens, plus the portfolio button. The animated hero is rendered by ascii_hero.py.
 
 Standard library only. Run from the repository root:
 
@@ -225,8 +225,23 @@ def footer():
     return svg(W_, H_, title, desc, "".join(b), "footer")
 
 
+# ---------------------------------------------------------------------------
+# Portfolio button (linked from the README)
+# ---------------------------------------------------------------------------
+
+def portfolio_button():
+    W_, H_ = 420, 64
+    b = [f'<rect x=".5" y=".5" width="{W_ - 1}" height="{H_ - 1}" fill="{BG}" stroke="#34373E"/>',
+         f'<rect x="22" y="{H_ / 2 - 5}" width="10" height="10" fill="{ACCENT}"/>',
+         text(48, H_ / 2 + 5, "VISIT PORTFOLIO", 15, TEXT, spacing=3.2),
+         f'<path d="M{W_ - 44} {H_ / 2 + 7}L{W_ - 30} {H_ / 2 - 7}M{W_ - 41} {H_ / 2 - 7}H{W_ - 30}V{H_ / 2 + 4}" '
+         f'stroke="{ACCENT}" stroke-width="2" fill="none"/>']
+    return svg(W_, H_, "Visit portfolio", "Button linking to DimaLab's portfolio website.", "".join(b), "btn")
+
+
 if __name__ == "__main__":
-    for name, fn in (("storymodengine.svg", storymodengine), ("footer.svg", footer)):
+    for name, fn in (("storymodengine.svg", storymodengine), ("footer.svg", footer),
+                     ("portfolio.svg", portfolio_button)):
         data = fn()
         (OUT / name).write_text(data, encoding="utf-8")
         print(f"{name}: {len(data.encode()) / 1024:.1f} KB")
