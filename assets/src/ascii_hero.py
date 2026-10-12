@@ -4,8 +4,9 @@ The artwork is a liquid structure that becomes a self-portrait. Three linked
 masses and four droplets flow, split and fuse; then they gather into one mass,
 the portrait (made by avatar_ascii.py from the avatar photo) crystallises out of
 the characters from the centre outwards, holds while a scan line passes, and
-dissolves back into liquid. The two descriptor lines type themselves out with a
-cyan cursor at the start of every loop and are erased just before it ends.
+dissolves back into liquid. "Software developer." stays put; the line under it
+types "Building tools.", swaps the word for "engines." and then "experiments.",
+settles on the full tagline and is erased just before the loop ends.
 
 Every frame is ray-marched in 3D and shaded into characters on a fixed
 monospace grid: brightness picks a glyph from a density ramp and a grey level,
@@ -156,6 +157,7 @@ def static_layers(mono_path, sans_path):
     d = ImageDraw.Draw(big)
     mono13 = ImageFont.truetype(mono_path, 13 * SS)
     sans26 = ImageFont.truetype(sans_path, 26 * SS)
+    spaced(d, 55, 334, "Software developer.", sans26, TEXT)
     L, R = 56, 1144
 
     spaced(d, L, 46, "DIMALAB / ENGINEERING", mono13, MUTED, 2.6)
@@ -178,17 +180,8 @@ def static_layers(mono_path, sans_path):
         o.rectangle(((x - 7) * SS, (y - 7) * SS, (x + 7) * SS, (y + 7) * SS), fill=BG + (255,))
         o.rectangle(((x - 5) * SS, y * SS - 1, (x + 5) * SS, y * SS + 1), fill=DIM + (255,))
         o.rectangle((x * SS - 1, (y - 5) * SS, x * SS + 1, (y + 5) * SS), fill=DIM + (255,))
-    # Descriptor lines, each on its own layer so frames can reveal them a character at a time.
-    typing = []
-    for text_, baseline, colour in TYPED:
-        layer = Image.new("RGBA", (W_PX * SS, H_PX * SS), (0, 0, 0, 0))
-        spaced(ImageDraw.Draw(layer), L - 1, baseline, text_, sans26, colour + (255,))
-        # Cut points after each character, matching how spaced() advances.
-        cuts, x = [L - 1], (L - 1) * SS
-        for ch in text_:
-            x += sans26.getlength(ch)
-            cuts.append(x / SS)
-        typing.append((layer.resize((W_PX, H_PX), Image.LANCZOS), baseline, cuts))
+    # The typed line is drawn per frame with this font (at 3x, then downsampled like everything else).
+    typing = sans26
     return base, over.resize((W_PX, H_PX), Image.LANCZOS), typing
 
 
@@ -331,39 +324,62 @@ def portrait_grid(rows):
 TONE_GREY = {"0": 74, "1": 99, "2": 128, "3": 162, "4": 199, "5": 244}
 
 
-TYPED = (("Software developer.", 334, TEXT), ("Building tools, engines & experiments.", 368, MUTED))
-TYPE_STEP = 1 / LOOP_FRAMES  # one character per frame while typing
+TYPED_LINE = ("Building ", 368, MUTED)  # prefix, baseline, colour
+WORDS = ("tools.", "engines.", "experiments.")
+FINAL = "tools, engines & experiments."
 
 
-def typed(t):
-    """Characters shown on each descriptor line and where the cursor is, at loop time t."""
-    n1, n2 = len(TYPED[0][0]), len(TYPED[1][0])
-    start1 = 4 * TYPE_STEP
-    start2 = start1 + (n1 + 3) * TYPE_STEP
-    erase = 0.92                        # erase both lines quickly before the loop wraps
-    if t >= erase:
-        k = (t - erase) / (0.985 - erase)  # 0..1 over the erase
-        left = max(0.0, 1 - k) * (n1 + n2)
-        a, b = min(n1, round(left)), max(0, round(left) - n1)
-        return a, b, (1 if b > 0 else 0), True
-    a = max(0, min(n1, int((t - start1) / TYPE_STEP))) if t >= start1 else 0
-    b = max(0, min(n2, int((t - start2) / TYPE_STEP))) if t >= start2 else 0
-    line = 1 if t >= start2 else 0
-    # The cursor stays solid rather than blinking: a GIF frame stores one changed
-    # rectangle, and a blink on the left would widen it to the whole banner.
-    return a, b, line, True
+def type_script():
+    """The typed text for every frame of the loop (one string per frame)."""
+    out = [""]
+
+    def hold(n):
+        out.extend([out[-1]] * n)
+
+    def add(target, per_frame):
+        """Type (or erase) towards `target`, `per_frame` characters per frame."""
+        cur = out[-1]
+        while cur != target:
+            for _ in range(per_frame):
+                if cur == target:
+                    break
+                if target.startswith(cur):
+                    cur = target[:len(cur) + 1]
+                else:
+                    cur = cur[:-1]
+            out.append(cur)
+
+    prefix = TYPED_LINE[0]
+    hold(3)
+    add(prefix, 1)
+    for i, word in enumerate(WORDS):
+        add(prefix + word, 1)
+        hold(7 if i < len(WORDS) - 1 else 5)
+        add(prefix, 2)              # erase the word, keep "Building "
+    add(prefix + FINAL, 2)          # settle on the full tagline
+    hold(LOOP_FRAMES - len(out) - 16)
+    add("", 3)                      # erase everything just before the loop wraps
+    hold(LOOP_FRAMES - len(out))
+    return out[:LOOP_FRAMES]
 
 
-def draw_typing(img, typing, t):
-    shown = typed(t)
-    for i, (layer, baseline, cuts) in enumerate(typing):
-        x_cut = cuts[shown[i]]
-        if shown[i]:
-            box = (0, baseline - 30, round(x_cut) + 1, baseline + 10)
-            img.paste(layer.crop(box), box[:2], layer.crop(box))
-        if shown[2] == i and shown[3]:
-            cx = round(x_cut) + 3
-            ImageDraw.Draw(img).rectangle((cx, baseline - 21, cx + 1, baseline + 4), fill=ACCENT)
+SCRIPT = type_script()
+
+
+def draw_typing(img, font, t):
+    """Draws the typed line and a cyan cursor for loop time t."""
+    text_, baseline, colour = TYPED_LINE[0], TYPED_LINE[1], TYPED_LINE[2]
+    shown = SCRIPT[min(int(t * LOOP_FRAMES + 1e-6), LOOP_FRAMES - 1)]
+    x0 = 55
+    box = (x0 - 4, baseline - 34, 700, baseline + 12)
+    layer = Image.new("RGBA", ((box[2] - box[0]) * SS, (box[3] - box[1]) * SS), (0, 0, 0, 0))
+    if shown:
+        spaced(ImageDraw.Draw(layer), (x0 - box[0]) , baseline - box[1], shown, font, colour + (255,))
+    layer = layer.resize((box[2] - box[0], box[3] - box[1]), Image.LANCZOS)
+    img.paste(layer, box[:2], layer)
+    width = sum(font.getlength(c) for c in shown) / SS
+    cx = round(x0 + width) + 3
+    ImageDraw.Draw(img).rectangle((cx, baseline - 21, cx + 1, baseline + 4), fill=ACCENT)
 
 
 def render_frame(t, base, over, font, cw, ch, cols, rows, face, typing):
@@ -418,7 +434,7 @@ def render_frame(t, base, over, font, cw, ch, cols, rows, face, typing):
             g = int(70 + 185 * min(1.0, lum * 1.1))
             d.text((x, y), RAMP[idx], font=font, fill=ACCENT if cyan else (g, g, min(255, g + 3)))
     img.paste(over, (0, 0), over)
-    draw_typing(img, typing, t)
+    draw_typing(img, typing, t)  # `typing` is the 3x sans font
     return img
 
 
