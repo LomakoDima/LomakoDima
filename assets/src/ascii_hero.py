@@ -174,17 +174,7 @@ def static_layers(mono_path, sans_path):
 
     over = Image.new("RGBA", (W_PX * SS, H_PX * SS), (0, 0, 0, 0))
     o = ImageDraw.Draw(over)
-    mono11 = ImageFont.truetype(mono_path, 11 * SS)
     fx0, fy0, fx1, fy1 = FIG
-    labels = ((fx0 + 12, fy0 + 4, "FIG. 01", "ls"), (fx1 - 12, fy0 + 4, "LIQUID → SELF-PORTRAIT", "rs"),
-              (fx0 + 12, fy1 + 4, "SDF · 7 BODIES · 1 FACE", "ls"),
-              (fx1 - 12, fy1 + 4, f"ASCII · {LOOP_FRAMES * FRAME_MS / 1000:.1f} S LOOP", "rs"))
-    for x, y, s, anchor in labels:
-        # A black plate keeps labels readable over the character grid.
-        width = sum(mono11.getlength(c) for c in s) / SS + 1.6 * (len(s) - 1)
-        left = x - (width if anchor[0] == "r" else 0)
-        o.rectangle(((left - 5) * SS, (y - 11) * SS, (left + width + 5) * SS, (y + 4) * SS), fill=BG + (255,))
-        spaced(o, x, y, s, mono11, DIM + (255,), 1.6, anchor)
     for x, y in ((fx0, fy0), (fx1, fy0), (fx0, fy1), (fx1, fy1)):
         o.rectangle(((x - 7) * SS, (y - 7) * SS, (x + 7) * SS, (y + 7) * SS), fill=BG + (255,))
         o.rectangle(((x - 5) * SS, y * SS - 1, (x + 5) * SS, y * SS + 1), fill=DIM + (255,))
@@ -407,7 +397,7 @@ def main():
     cols = int((FIELD[2] - FIELD[0]) // cw)
     rows = int((FIELD[3] - FIELD[1]) // ch)
     base, over = static_layers(mono, sans)
-    face = portrait_grid(rows - 2)  # a row of margin above and below for the corner labels
+    face = portrait_grid(rows)
 
     frames = []
     for i in range(args.frames):
