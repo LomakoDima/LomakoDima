@@ -1,9 +1,10 @@
 """Renders the animated ASCII hero banner: assets/hero.gif.
 
-The artwork is a liquid structure: three linked masses form an elongated body
-while four droplets keep breaking away, stretching into filaments and fusing
-back in, so the form dissolves and rebuilds itself as it moves. Slow ripples
-run over the surface and a thin cyan scan pulse sweeps through it.
+The artwork is a liquid structure that becomes a self-portrait. Three linked
+masses and four droplets flow, split and fuse; then they gather into one mass,
+the portrait (made by avatar_ascii.py from the avatar photo) crystallises out of
+the characters from the centre outwards, holds while a scan line passes, and
+dissolves back into liquid.
 
 Every frame is ray-marched in 3D and shaded into characters on a fixed
 monospace grid: brightness picks a glyph from a density ramp and a grey level,
@@ -33,15 +34,17 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import avatar_ascii  # noqa: E402  (photo -> ASCII portrait)
 import build  # noqa: E402  (design tokens and wordmark geometry)
 
 OUT = Path(__file__).resolve().parent.parent
 
 W_PX, H_PX = 1200, 480
-LOOP_FRAMES = 120
-FRAME_MS = 70  # GIF delays are in 10 ms steps; 120 x 70 ms = 8.4 s per loop
+LOOP_FRAMES = 150
+FRAME_MS = 70  # GIF delays are in 10 ms steps; 150 x 70 ms = 10.5 s per loop
 RAMP = " .,:;irsXA253hMHGS#9B&@"
-GRID_FONT_PX = 11
+GRID_FONT_PX = 10
+AVATAR = OUT / "github_avatar_under_1mb.jpg"
 FIELD = (676, 84, 1150, 412)  # x0, y0, x1, y1 of the character grid
 FIG = (690, 96, 1144, 398)    # registration frame around the artwork
 
@@ -173,8 +176,8 @@ def static_layers(mono_path, sans_path):
     o = ImageDraw.Draw(over)
     mono11 = ImageFont.truetype(mono_path, 11 * SS)
     fx0, fy0, fx1, fy1 = FIG
-    labels = ((fx0 + 12, fy0 + 4, "FIG. 01", "ls"), (fx1 - 12, fy0 + 4, "LIQUID STRUCTURE", "rs"),
-              (fx0 + 12, fy1 + 4, "SDF · 7 BODIES", "ls"),
+    labels = ((fx0 + 12, fy0 + 4, "FIG. 01", "ls"), (fx1 - 12, fy0 + 4, "LIQUID → SELF-PORTRAIT", "rs"),
+              (fx0 + 12, fy1 + 4, "SDF · 7 BODIES · 1 FACE", "ls"),
               (fx1 - 12, fy1 + 4, f"ASCII · {LOOP_FRAMES * FRAME_MS / 1000:.1f} S LOOP", "rs"))
     for x, y, s, anchor in labels:
         # A black plate keeps labels readable over the character grid.
@@ -205,8 +208,24 @@ def smin(a, b, k=BLEND):
     return min(a, b) - h * h * k * 0.25
 
 
+def smoothstep(a, b, x):
+    x = min(1.0, max(0.0, (x - a) / (b - a)))
+    return x * x * (3 - 2 * x)
+
+
+def gather(t):
+    """How far the bodies have pulled together into one head-sized mass (0..1)."""
+    return smoothstep(0.16, 0.38, t) * (1 - smoothstep(0.80, 0.98, t))
+
+
+def reveal(t):
+    """How much of the portrait has crystallised out of the liquid (0..1)."""
+    return smoothstep(0.30, 0.46, t) * (1 - smoothstep(0.78, 0.93, t))
+
+
 def bodies(t):
     a = TAU * t
+    g = gather(t)
     out = [
         # three linked masses that form the body
         ((-0.55 + 0.25 * math.sin(a), 0.20 * math.sin(2 * a), 0.15 * math.cos(a)), 0.52 + 0.04 * math.sin(2 * a)),
@@ -219,6 +238,11 @@ def bodies(t):
         ang = turns * a + phase
         rad = 0.85 + 0.45 * math.sin(beat * a + phase)
         out.append(((rad * math.cos(ang) * 1.25, rad * math.sin(ang) * tilt, rad * math.sin(ang) * 0.7), r))
+    if g:
+        # Pull everything towards one mass where the head will appear; droplets melt in.
+        head, head_r = (0.0, 0.05, 0.0), 0.72
+        out = [(tuple(c + (hc - c) * g for c, hc in zip(centre, head)),
+                r + ((head_r if i < 3 else 0.02) - r) * g) for i, (centre, r) in enumerate(out)]
     return out
 
 
@@ -297,17 +321,58 @@ def shade(t, cols, rows, aspect):
 # Frames
 # ---------------------------------------------------------------------------
 
-def render_frame(t, base, over, font, cw, ch, cols, rows):
+def portrait_grid(rows):
+    """The avatar as (char, tone) cells, `rows` tall, from avatar_ascii's pipeline."""
+    # Head and neck only, with lighter edges and gamma tuned for this coarse grid.
+    art, cols = avatar_ascii.convert(str(AVATAR), rows, keep=0.84, gamma=0.92, edge=0.22)
+    return [[(ch, tn) for ch, tn in zip(row["text"].ljust(cols), row["tone"].ljust(cols))] for row in art], cols
+
+
+TONE_GREY = {"0": 74, "1": 99, "2": 128, "3": 162, "4": 199, "5": 244}
+
+
+def render_frame(t, base, over, font, cw, ch, cols, rows, face):
     img = base.copy()
     d = ImageDraw.Draw(img)
     x0, y0 = FIELD[0], FIELD[1]
+    grid_face, face_cols = face
+    fr0, fc0 = (rows - len(grid_face)) // 2, (cols - face_cols) // 2
+    p = reveal(t)
+    hold = smoothstep(0.46, 0.50, t) * (1 - smoothstep(0.74, 0.78, t))
+    scan = (t - 0.47) / 0.28 * (rows + 6) - 3            # scan line row during the hold
+    glitch = {0.56: (11, 2), 0.66: (19, -2)}             # time -> (row, shift) for one frame
+    shift_row = next((v for k, v in glitch.items() if abs(t - k) < 0.004), None)
     for r, row in enumerate(shade(t, cols, rows, cw / ch)):
         for c, cell in enumerate(row):
             x, y = x0 + c * cw, y0 + r * ch
+            fr, fc = r - fr0, c - fc0
+            if shift_row and r == shift_row[0] + fr0:
+                fc -= shift_row[1]
+            in_face = 0 <= fr < len(grid_face) and 0 <= fc < face_cols
+            # Crystallisation order: from the centre of the face outwards, with jitter.
+            hsh = math.sin(c * 12.9898 + r * 78.233) * 43758.5453
+            f = hsh - math.floor(hsh)
+            radial = math.hypot((c - cols / 2) / (cols / 2), (r - rows / 2) / (rows / 2)) / 1.42
+            order = 0.62 * radial + 0.38 * f
+            if p > 0 and order < p:
+                glyph, tone = grid_face[fr][fc] if in_face else (" ", " ")
+                if p < 1 and order > p - 0.035 and (glyph != " " or cell) and f < 0.6:
+                    # The crystallisation front: brief cyan sparks where there is matter.
+                    d.text((x, y), RAMP[int(f * 9973) % (len(RAMP) - 1) + 1], font=font, fill=ACCENT)
+                elif glyph != " ":
+                    if tone == "c":
+                        col = ACCENT
+                    else:
+                        g = TONE_GREY.get(tone, 160)
+                        if hold and abs(r - scan) < 1.0:
+                            g = min(255, g + 70)  # scan line brightens the row it passes
+                        col = (g, g, min(255, g + 3))
+                    d.text((x, y), glyph, font=font, fill=col)
+                elif f > 0.975:
+                    d.text((x, y), ".", font=font, fill=(52, 52, 56))
+                continue
             if cell is None:
                 # Dust: sparse punctuation in empty space, twinkling with the loop.
-                hsh = math.sin(c * 12.9898 + r * 78.233) * 43758.5453
-                f = hsh - math.floor(hsh)
                 if f > 0.965:
                     g = int(38 + 46 * (0.5 + 0.5 * math.sin(TAU * (t + f * 7))))
                     d.text((x, y), ".`'"[int(f * 1000) % 3], font=font, fill=(g, g, g + 4))
@@ -342,11 +407,12 @@ def main():
     cols = int((FIELD[2] - FIELD[0]) // cw)
     rows = int((FIELD[3] - FIELD[1]) // ch)
     base, over = static_layers(mono, sans)
+    face = portrait_grid(rows - 2)  # a row of margin above and below for the corner labels
 
     frames = []
     for i in range(args.frames):
         t = i / args.frames
-        frames.append(render_frame(t, base, over, font, cw, ch, cols, rows))
+        frames.append(render_frame(t, base, over, font, cw, ch, cols, rows, face))
         print(f"\rframe {i + 1}/{args.frames}", end="", file=sys.stderr)
     print(file=sys.stderr)
 
@@ -358,9 +424,9 @@ def main():
 
     # One shared palette (no dithering) keeps glyph edges clean and lets the
     # GIF encoder store only the changed region of each frame.
-    sample = Image.new("RGB", (W_PX, H_PX * 2))
-    sample.paste(frames[0], (0, 0))
-    sample.paste(frames[len(frames) // 3], (0, H_PX))
+    sample = Image.new("RGB", (W_PX, H_PX * 3))
+    for k, i in enumerate((0, len(frames) // 3, len(frames) * 3 // 5)):  # liquid, gathering, portrait
+        sample.paste(frames[i], (0, k * H_PX))
     palette = sample.quantize(colors=96, method=Image.Quantize.MEDIANCUT, dither=Image.Dither.NONE)
     pal_frames = [f.quantize(palette=palette, dither=Image.Dither.NONE) for f in frames]
     out = OUT / "hero.gif"

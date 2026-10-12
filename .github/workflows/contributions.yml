@@ -25,28 +25,17 @@ jobs:
         with:
           python-version: "3.12"
 
-      # Each generator exits non-zero on API errors or incomplete data without
-      # touching its SVG. One failing does not stop the other from being committed;
-      # the last step still marks the run as failed.
+      # Exits non-zero on API errors or incomplete data without touching the SVGs.
       - name: Render calendar, streaks and snake
-        id: calendar
-        continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python assets/src/contributions.py --login "${{ github.repository_owner }}"
-
-      - name: Render profile card
-        id: card
-        continue-on-error: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: python assets/src/card.py --login "${{ github.repository_owner }}"
 
       # Pushes made with GITHUB_TOKEN do not trigger other workflows, so this
       # commit does not start the DevLog workflow.
       - name: Commit if changed
         run: |
-          files="assets/activity.svg assets/activity-mobile.svg assets/card.svg assets/card-mobile.svg"
+          files="assets/activity.svg assets/activity-mobile.svg"
           if git diff --quiet -- $files; then
             echo "Nothing changed."
             exit 0
@@ -54,11 +43,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add $files
-          git commit -m "chore: refresh contribution calendar and profile card"
+          git commit -m "chore: refresh contribution calendar"
           git push
-
-      - name: Fail if a generator failed
-        if: steps.calendar.outcome == 'failure' || steps.card.outcome == 'failure'
-        run: |
-          echo "calendar: ${{ steps.calendar.outcome }}, card: ${{ steps.card.outcome }}"
-          exit 1

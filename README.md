@@ -1,15 +1,10 @@
-<!-- Hero: assets/src/ascii_hero.py. Card: assets/src/card.py (portrait from avatar_ascii.py). Calendar, streaks, snake: assets/src/contributions.py. Plates, button, footer: assets/src/build.py -->
+<!-- Hero: assets/src/ascii_hero.py (portrait via avatar_ascii.py). Calendar, streaks, snake: assets/src/contributions.py. Plates, button, footer: assets/src/build.py -->
 
-<img src="assets/hero.gif" width="100%" alt="DimaLab. — Software developer. Building tools, engines and experiments. Editorial banner with animated ASCII art: a liquid structure drawn entirely in text characters, whose droplets break away, stretch into filaments and fuse back into the body, with sparse cyan characters sweeping across it.">
-
-Software close to the system — taskbars, render pipelines, mod loaders — built with attention to how it feels to use.
-
-<picture>
-  <source media="(max-width: 600px)" srcset="https://github.com/LomakoDima/LomakoDima/raw/main/assets/card-mobile.svg">
-  <img src="assets/card.svg" width="100%" alt="whoami: an ASCII portrait of DimaLab drawn in text characters, with cyan eyes, next to a neofetch-style panel. OS Windows 11, host Kazakhstan UTC+5, focus on engines, Windows utilities and Minecraft systems, building StoryModEngine, plus live GitHub stats: repositories, stars, followers, contributions in the last year, current and longest streak, and the busiest day. Updated daily.">
-</picture>
+<img src="assets/hero.gif" width="100%" alt="DimaLab. — Software developer. Building tools, engines and experiments. Editorial banner with animated ASCII art drawn entirely in text characters: a liquid structure flows and splits, gathers into one mass and crystallises into an ASCII self-portrait with cyan eyes, holds while a scan line passes, then dissolves back into liquid.">
 
 <a href="https://dima-s-cinematic-journey-new.vercel.app"><img src="assets/portfolio.svg" width="300" alt="Visit portfolio"></a>
+
+Software close to the system — taskbars, render pipelines, mod loaders — built with attention to how it feels to use.
 
 <br>
 
