@@ -49,22 +49,35 @@ def subject_mask(img, tol=30):
     return subject, bg
 
 
-def convert(path, rows, keep=1.0, gamma=None, edge=None):
-    """keep: fraction of the subject height to use from the top (e.g. 0.85 drops the shirt)."""
+def convert(path, rows, keep=1.0, gamma=None, edge=None, head_margin=None):
+    """keep: fraction of the subject height to use from the top (e.g. 0.85 drops the shirt).
+
+    head_margin: if set, crop the width to the head (hair and ears, measured on the upper
+    part of the subject) plus this fraction of its width on each side, so wide shoulders
+    do not squash the portrait.
+    """
     img = Image.open(path).convert("RGB")
     subject, bg = subject_mask(img)
     box = subject.getbbox()
     box = (box[0], box[1], box[2], box[1] + round((box[3] - box[1]) * keep))
+    if head_margin is not None:
+        top_rows = subject.crop((0, box[1], subject.width, box[1] + round((box[3] - box[1]) * 0.62)))
+        hb = top_rows.getbbox()
+        pad = round((hb[2] - hb[0]) * head_margin)
+        box = (max(0, hb[0] - pad), box[1], min(subject.width, hb[2] + pad), box[3])
     img, subject = img.crop(box), subject.crop(box)
     w, h = img.size
     cols = round(rows * (w / h) / CELL_ASPECT)
+    # Filters are tuned for ~9 px per character cell; scale them for larger photos so the
+    # fine texture of the fabric is averaged out instead of becoming noise.
+    k = max(1.0, (h / rows) / 18)
 
     grey = ImageOps.grayscale(img)
     # Equalise inside the subject only, so skin tones spread across the whole ramp.
-    lum = ImageOps.equalize(grey, mask=subject).filter(ImageFilter.UnsharpMask(radius=3, percent=140, threshold=2))
+    lum = ImageOps.equalize(grey, mask=subject).filter(ImageFilter.UnsharpMask(radius=3 * k, percent=140, threshold=2))
     # Darken along edges so features (eyelids, nose, mouth) are outlined by sparser glyphs.
-    edges = grey.filter(ImageFilter.GaussianBlur(1.5)).filter(ImageFilter.FIND_EDGES)
-    edges = edges.point(lambda v: min(255, v * 5)).filter(ImageFilter.GaussianBlur(1.2))
+    edges = grey.filter(ImageFilter.GaussianBlur(1.5 * k)).filter(ImageFilter.FIND_EDGES)
+    edges = edges.point(lambda v: min(255, int(v * 5 / k))).filter(ImageFilter.GaussianBlur(1.2 * k))
     lum = Image.composite(Image.new("L", lum.size, 0), lum, edges.point(lambda v: int(v * (EDGE_WEIGHT if edge is None else edge))))
     # Stretch contrast using the subject's own histogram, not the background's.
     hist = lum.histogram(mask=subject)
@@ -109,7 +122,7 @@ def convert(path, rows, keep=1.0, gamma=None, edge=None):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("image", nargs="?", default=str(HERE.parent / "github_avatar_under_1mb.jpg"))
+    ap.add_argument("image", nargs="?", default=str(HERE.parent / "github-ascii-profile.jpg"))
     ap.add_argument("--rows", type=int, default=44)
     args = ap.parse_args()
     rows, cols = convert(args.image, args.rows)

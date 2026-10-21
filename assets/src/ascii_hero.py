@@ -46,7 +46,7 @@ LOOP_FRAMES = 150
 FRAME_MS = 70  # GIF delays are in 10 ms steps; 150 x 70 ms = 10.5 s per loop
 RAMP = " .,:;irsXA253hMHGS#9B&@"
 GRID_FONT_PX = 10
-AVATAR = OUT / "github_avatar_under_1mb.jpg"
+AVATAR = OUT / "github-ascii-profile.jpg"
 FIELD = (676, 84, 1150, 412)  # x0, y0, x1, y1 of the character grid
 FIG = (690, 96, 1144, 398)    # registration frame around the artwork
 
@@ -316,8 +316,8 @@ def shade(t, cols, rows, aspect):
 
 def portrait_grid(rows):
     """The avatar as (char, tone) cells, `rows` tall, from avatar_ascii's pipeline."""
-    # Head and neck only, with lighter edges and gamma tuned for this coarse grid.
-    art, cols = avatar_ascii.convert(str(AVATAR), rows, keep=0.84, gamma=0.92, edge=0.22)
+    # Head, neck and a hint of shoulders; edges and gamma tuned for this coarse grid.
+    art, cols = avatar_ascii.convert(str(AVATAR), rows, keep=0.80, gamma=0.92, edge=0.22, head_margin=0.18)
     return [[(ch, tn) for ch, tn in zip(row["text"].ljust(cols), row["tone"].ljust(cols))] for row in art], cols
 
 
